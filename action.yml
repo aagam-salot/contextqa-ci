@@ -11,7 +11,7 @@ inputs:
     required: true
   token:
     description: >
-      ContextQA API token (token_…), from a secret. Give it TEST_PLAN_EXECUTE (which also covers build uploads) and TEST_PLAN_RESULTS_READ, plus TEST_CASE_RESULTS_READ for per-test results.
+      ContextQA API token (token_…), from a secret. Give it TEST_PLAN_EXECUTE (which also covers build uploads) and TEST_PLAN_RESULTS_READ, plus TEST_CASE_RESULTS_READ for per-test results and TEST_STEP_RESULTS_READ for each failure's step and screenshot.
       A legacy CI token also works, with counts only.
     required: true
   api-url:
@@ -33,7 +33,7 @@ inputs:
     description: Seconds between status checks.
     default: '15'
   junit-path:
-    description: Also write the results as JUnit XML to this path.
+    description: Also write the results as JUnit XML to this path; failed-step screenshots go to a contextqa-screenshots folder beside it.
   fail-on:
     description: "`failure` fails the job unless the run passed; `never` only reports."
     default: failure

@@ -70,6 +70,83 @@ describe('toJUnitXml', () => {
   });
 });
 
+describe('toJUnitXml (CON-6433)', () => {
+  it("uses the run's wall-clock for the run and for its only suite, not the sum of parallel cases", () => {
+    const summary: RunSummary = {
+      runId: 4512,
+      results: { ...baseResults, result: 'SUCCESS', duration: 3_600_000, wallClockMs: 1_350_000 },
+      passed: true,
+      testCases: [outcome(1, 'SUCCESS', { durationMs: 250_000 }), outcome(2, 'SUCCESS', { durationMs: 1_300_000 })],
+    };
+
+    const xml = toJUnitXml(summary, '827');
+
+    expect(xml).toContain('<testsuites name="ContextQA test plan 827" tests="2" failures="0" errors="0" skipped="0" time="1350.000">');
+    expect(xml).toContain('<testsuite name="Checkout" tests="2" failures="0" errors="0" skipped="0" time="1350.000">');
+    expect(xml).toContain('<testcase name="Case 1" classname="Checkout" time="250.000"/>');
+    expect(xml).toContain('<testcase name="Case 2" classname="Checkout" time="1300.000"/>');
+  });
+
+  it('keeps each suite at the sum of its cases when the run has several suites', () => {
+    const summary: RunSummary = {
+      runId: 9,
+      results: { ...baseResults, wallClockMs: 3_000 },
+      passed: false,
+      testCases: [outcome(1, 'SUCCESS'), outcome(2, 'SUCCESS', { suite: 'Login' })],
+    };
+
+    const xml = toJUnitXml(summary, '827');
+
+    expect(xml).toContain('<testsuites name="ContextQA test plan 827" tests="2" failures="0" errors="0" skipped="0" time="3.000">');
+    expect(xml).toContain('<testsuite name="Checkout" tests="1" failures="0" errors="0" skipped="0" time="1.250">');
+    expect(xml).toContain('<testsuite name="Login" tests="1" failures="0" errors="0" skipped="0" time="1.250">');
+  });
+
+  it('adds the failed step, its error and exception, the report link and the screenshot', () => {
+    const summary: RunSummary = {
+      runId: 9,
+      reportUrl: 'https://app.example.com/td/runs/9',
+      results: baseResults,
+      passed: false,
+      testCases: [
+        outcome(2, 'FAILURE', {
+          message: 'Element not found',
+          failedStep: {
+            stepResultId: 501,
+            step: 'Click on Submit',
+            message: 'Timed out after 30s',
+            exception: 'NoSuchElementException',
+            hasScreenshot: true,
+          },
+          screenshotPath: 'reports/contextqa-screenshots/2.png',
+        }),
+      ],
+    };
+
+    const xml = toJUnitXml(summary, '827');
+
+    expect(xml).toContain('<property name="contextqa.report" value="https://app.example.com/td/runs/9"/>');
+    expect(xml).toContain(
+      '<failure message="Element not found" type="FAILURE">Element not found\nFailed step: Click on Submit\nError: Timed out after 30s\nException: NoSuchElementException\nReport: https://app.example.com/td/runs/9</failure>',
+    );
+    expect(xml).toContain('<system-out>[[ATTACHMENT|reports/contextqa-screenshots/2.png]]</system-out>');
+  });
+
+  it("uses the failed step's error when the result has no message of its own", () => {
+    const failedStep = { stepResultId: 501, step: 'Open login', message: 'Page did not load', hasScreenshot: false };
+    const xml = toJUnitXml({ runId: 9, results: baseResults, passed: false, testCases: [outcome(2, 'FAILURE', { failedStep })] }, '827');
+
+    expect(xml).toContain('<failure message="Page did not load" type="FAILURE">Failed step: Open login\nError: Page did not load</failure>');
+    expect(xml).not.toContain('<system-out>');
+  });
+
+  it('collapses a run without per-test detail into one case timed by the wall-clock', () => {
+    const xml = toJUnitXml({ runId: 9, results: { ...baseResults, result: 'SUCCESS', wallClockMs: 2_000 }, passed: true }, '827');
+
+    expect(xml).toContain('<testcase name="Test plan 827 (run 9)" classname="ContextQA" time="2.000"/>');
+  });
+});
+
 describe('exitCodeFor', () => {
   it('fails a non-passing run unless told never to', () => {
     const failed: RunSummary = { runId: 1, passed: false };

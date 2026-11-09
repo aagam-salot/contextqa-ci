@@ -16,7 +16,7 @@ steps:
 
 1. Install the **ContextQA Test Plan** extension from the Visual Studio Marketplace into your organization.
 2. Add `CONTEXTQA_TOKEN` as a **secret** pipeline variable (or in a variable group). Use an API token with
-   `TEST_PLAN_EXECUTE` (which also covers build uploads) and `TEST_PLAN_RESULTS_READ`, plus `TEST_CASE_RESULTS_READ` for per-test results. Azure does not expose secret variables to tasks on its
+   `TEST_PLAN_EXECUTE` (which also covers build uploads) and `TEST_PLAN_RESULTS_READ`, plus `TEST_CASE_RESULTS_READ` for per-test results and `TEST_STEP_RESULTS_READ` for each failure's step and error. Azure does not expose secret variables to tasks on its
    own; the `token` input (or an `env:` mapping) is what passes it in.
 
 ## Inputs

@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -287,5 +287,145 @@ describe('runTestPlan', () => {
     await expect(runTestPlan(options(override), recordingReporter(), { fetch: new FakeServer().fetch })).rejects.toThrow(
       message,
     );
+  });
+});
+
+describe('runTestPlan reports for CI (CON-6433)', () => {
+  function server(caseRows: Record<string, unknown>[], extraResults: Record<string, unknown> = {}): FakeServer {
+    return new FakeServer()
+      .on('GET', '/test_plans/827/execution', () => json({ id: 77 }))
+      .on('GET', '/test_plan_results/77/results', () => json(results(extraResults)))
+      .on('GET', '/test_case_results', () => json({ content: caseRows, last: true }));
+  }
+
+  it("works out the run's wall-clock from its start and end", async () => {
+    const fake = server([], { startTime: '2026-01-10T10:00:00.000+00:00', endTime: '2026-01-10T10:22:30.000+00:00', duration: 3_600_000 });
+
+    const summary = await runTestPlan(options(), recordingReporter(), { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.results?.wallClockMs).toBe(1_350_000);
+    expect(summary.results?.duration).toBe(3_600_000);
+  });
+
+  it('reads start and end sent as epoch millis too', async () => {
+    const fake = server([], { startTime: 1_768_039_200_000, endTime: 1_768_040_550_000 });
+
+    const summary = await runTestPlan(options(), recordingReporter(), { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.results?.wallClockMs).toBe(1_350_000);
+  });
+
+  it('leaves the wall-clock undefined without a start or an end', async () => {
+    const fake = server([], { startTime: '2026-01-10T10:00:00Z', endTime: null });
+
+    const summary = await runTestPlan(options(), recordingReporter(), { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.results?.wallClockMs).toBeUndefined();
+  });
+
+  it("names each test after the test case's current name, falling back to the saved one", async () => {
+    const fake = server([
+      testCaseRow(1, 'SUCCESS', { testCaseDetails: { name: 'Placeholder name' }, testCase: { name: 'TC-12 Checkout with saved card' } }),
+      testCaseRow(2, 'SUCCESS', { testCaseDetails: { name: 'Saved name' }, testCase: null }),
+      testCaseRow(3, 'SUCCESS', { testCaseDetails: null, testCase: null }),
+    ]);
+
+    const summary = await runTestPlan(options(), recordingReporter(), { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.testCases?.map((t) => t.name)).toEqual(['TC-12 Checkout with saved card', 'Saved name', 'Test case 1003']);
+  });
+
+  it('adds the failed step and saves its screenshot without sending the token to storage', async () => {
+    const dir = join(await mkdtemp(join(tmpdir(), 'cqa-shots-')), 'contextqa-screenshots');
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+    const fake = server([testCaseRow(1, 'SUCCESS'), testCaseRow(2, 'FAILURE')], { result: 'FAILURE' })
+      .on('GET', '/test_step_results', () =>
+        json({
+          content: [
+            { id: 500, result: 'SUCCESS', stepDetails: { action: 'Open login' } },
+            { id: 501, result: 'FAILURE', message: 'Timed out after 30s', webDriverException: 'NoSuchElementException', screenshotName: '501.png', stepDetails: { action: 'Click on Submit' } },
+            { id: 502, result: 'FAILURE', message: 'later', stepDetails: { action: 'Later step' } },
+          ],
+        }),
+      )
+      .on('GET', '/test_step_results/501', () => json({ id: 501, screenShotURL: 'https://storage.example.com/shots/501.png?X-Amz-Signature=SECRET' }))
+      .on('GET', '/shots/501.png', () => new Response(png, { status: 200 }));
+    const reporter = recordingReporter();
+
+    const summary = await runTestPlan(options({ screenshotDir: dir }), reporter, { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.passed).toBe(false);
+    const failed = summary.testCases?.find((t) => t.id === 2);
+    expect(failed?.failedStep).toEqual({
+      stepResultId: 501,
+      step: 'Click on Submit',
+      message: 'Timed out after 30s',
+      exception: 'NoSuchElementException',
+      hasScreenshot: true,
+    });
+    expect(failed?.screenshotPath).toBe(join(dir, '2.png'));
+    expect(new Uint8Array(await readFile(join(dir, '2.png')))).toEqual(png);
+    expect(summary.testCases?.find((t) => t.id === 1)?.failedStep).toBeUndefined();
+
+    const listing = fake.calls('/test_step_results')[0]!;
+    expect(listing.url.searchParams.get('query')).toBe('testCaseResultId:2');
+    const download = fake.calls('/shots/501.png')[0]!;
+    expect(download.headers.get('authorization')).toBeNull();
+    expect(reporter.lines.join('\n')).not.toContain('SECRET');
+  });
+
+  it('keeps the short message when the token may not read step results', async () => {
+    const fake = server([testCaseRow(2, 'FAILURE'), testCaseRow(3, 'FAILURE')], { result: 'FAILURE' }).on(
+      'GET',
+      '/test_step_results',
+      () => text('Forbidden', 403),
+    );
+    const reporter = recordingReporter();
+
+    const summary = await runTestPlan(options({ screenshotDir: '/tmp/never' }), reporter, { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.passed).toBe(false);
+    expect(summary.testCases?.every((t) => t.failedStep === undefined && t.screenshotPath === undefined)).toBe(true);
+    expect(summary.testCases?.[0]?.message).toBe('Element not found: #submit');
+    expect(fake.calls('/test_step_results')).toHaveLength(1);
+    expect(reporter.lines).toContain('WARN Failure details skipped: the token lacks the TEST_STEP_RESULTS_READ permission.');
+  });
+
+  it('adds the failed step but downloads nothing when no screenshot folder is given', async () => {
+    const fake = server([testCaseRow(2, 'FAILURE')], { result: 'FAILURE' }).on('GET', '/test_step_results', () =>
+      json({ content: [{ id: 501, result: 'FAILURE', message: 'Timed out', screenshotName: '501.png', stepDetails: { action: 'Click' } }] }),
+    );
+
+    const summary = await runTestPlan(options(), recordingReporter(), { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.testCases?.[0]?.failedStep?.step).toBe('Click');
+    expect(summary.testCases?.[0]?.screenshotPath).toBeUndefined();
+    expect(fake.calls('/test_step_results/501')).toHaveLength(0);
+  });
+
+  it('still reports the step when its screenshot cannot be fetched', async () => {
+    const dir = join(await mkdtemp(join(tmpdir(), 'cqa-shots-')), 'contextqa-screenshots');
+    const fake = server([testCaseRow(2, 'FAILURE')], { result: 'FAILURE' })
+      .on('GET', '/test_step_results', () =>
+        json({ content: [{ id: 501, result: 'FAILURE', message: 'Timed out', screenshotName: '501.png', stepDetails: { action: 'Click' } }] }),
+      )
+      .on('GET', '/test_step_results/501', () => json({ id: 501, screenShotURL: 'https://storage.example.com/shots/501.png?sig=SECRET' }))
+      .on('GET', '/shots/501.png', () => text('expired', 403));
+    const reporter = recordingReporter();
+
+    const summary = await runTestPlan(options({ screenshotDir: dir }), reporter, { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.testCases?.[0]?.failedStep?.step).toBe('Click');
+    expect(summary.testCases?.[0]?.screenshotPath).toBeUndefined();
+    expect(reporter.lines.some((l) => l.startsWith('WARN Screenshot for test case result 2 not saved'))).toBe(true);
+    expect(reporter.lines.join('\n')).not.toContain('SECRET');
+  });
+
+  it('makes no step-result calls for a passing run', async () => {
+    const fake = server([testCaseRow(1, 'SUCCESS')]);
+
+    await runTestPlan(options({ screenshotDir: '/tmp/never' }), recordingReporter(), { fetch: fake.fetch, ...fakeTime() });
+
+    expect(fake.calls('/test_step_results')).toHaveLength(0);
   });
 });

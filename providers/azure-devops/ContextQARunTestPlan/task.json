@@ -27,7 +27,7 @@
       "label": "API token",
       "required": false,
       "defaultValue": "$(CONTEXTQA_TOKEN)",
-      "helpMarkDown": "A secret pipeline variable holding a ContextQA API token. Needs TEST_PLAN_EXECUTE (which also covers build uploads) and TEST_PLAN_RESULTS_READ, plus TEST_CASE_RESULTS_READ for per-test results."
+      "helpMarkDown": "A secret pipeline variable holding a ContextQA API token. Needs TEST_PLAN_EXECUTE (which also covers build uploads) and TEST_PLAN_RESULTS_READ, plus TEST_CASE_RESULTS_READ for per-test results and TEST_STEP_RESULTS_READ for each failure's step and error."
     },
     {
       "name": "androidBuild",

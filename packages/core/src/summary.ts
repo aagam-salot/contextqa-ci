@@ -22,7 +22,7 @@ export function renderSummary(summary: RunSummary, planId: string): string {
     '',
     '| Total | Passed | Failed | Aborted | Stopped | Not run | Duration |',
     '|---:|---:|---:|---:|---:|---:|---:|',
-    `| ${r.totalCount} | ${r.passedCount} | ${r.failedCount} | ${r.abortedCount} | ${r.stoppedCount} | ${r.notExecutedCount} | ${duration(r.duration ?? 0)} |`,
+    `| ${r.totalCount} | ${r.passedCount} | ${r.failedCount} | ${r.abortedCount} | ${r.stoppedCount} | ${r.notExecutedCount} | ${duration(r.wallClockMs ?? r.duration ?? 0)} |`,
   );
   if (summary.reportUrl) lines.push('', `[Open the full report in ContextQA](${summary.reportUrl})`);
 
@@ -44,7 +44,11 @@ export function failingTests(summary: RunSummary): TestCaseOutcome[] {
 
 function row(t: TestCaseOutcome): string {
   const name = t.traceViewerUrl ? `[${cell(t.name)}](${t.traceViewerUrl})` : cell(t.name);
-  return `| ${name} | ${cell(t.suite)} | ${t.result} | ${cell(t.message)} |`;
+  const step = t.failedStep;
+  const message = [t.message || step?.message || '', step?.step ? `(failed step: ${step.step})` : '']
+    .filter(Boolean)
+    .join(' ');
+  return `| ${name} | ${cell(t.suite)} | ${t.result} | ${cell(message)} |`;
 }
 
 function cell(text: string): string {

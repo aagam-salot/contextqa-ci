@@ -1,5 +1,5 @@
 import { parseArgs } from 'node:util';
-import { ConfigError, FAIL_ON_VALUES, toBuildSource, type FailOn, type RunOptions } from '@contextqa/ci-core';
+import { ConfigError, FAIL_ON_VALUES, screenshotDirFor, toBuildSource, type FailOn, type RunOptions } from '@contextqa/ci-core';
 
 export const DEFAULT_API_URL = 'https://server.contextqa.com';
 const DEFAULT_TIMEOUT_SECONDS = 3600;
@@ -74,6 +74,7 @@ export function parseCommand(argv: string[], env: Env): ParsedCommand {
   const failOn = pick(values['fail-on'], 'CONTEXTQA_FAIL_ON') ?? 'failure';
   if (!isFailOn(failOn)) throw new ConfigError(`--fail-on must be one of ${FAIL_ON_VALUES.join(', ')}`);
 
+  const junitPath = pick(values.junit, 'CONTEXTQA_JUNIT_PATH');
   return {
     kind: 'run-plan',
     config: {
@@ -91,9 +92,10 @@ export function parseCommand(argv: string[], env: Env): ParsedCommand {
           DEFAULT_POLL_INTERVAL_SECONDS,
           '--poll-interval',
         ),
+        screenshotDir: junitPath ? screenshotDirFor(junitPath) : undefined,
       },
       failOn,
-      junitPath: pick(values.junit, 'CONTEXTQA_JUNIT_PATH'),
+      junitPath,
       jsonPath: pick(values.json, 'CONTEXTQA_JSON_PATH'),
     },
   };

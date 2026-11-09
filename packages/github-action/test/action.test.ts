@@ -81,6 +81,28 @@ describe('runAction', () => {
     expect(await readFile(join(dir, 'reports/junit.xml'), 'utf8')).toContain('failures="1"');
   });
 
+  it('saves the failed step and its screenshot beside the JUnit report (CON-6433)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cqa-action-'));
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 9]);
+    const server = failingServer()
+      .on('GET', '/test_step_results', () =>
+        json({ content: [{ id: 501, result: 'FAILURE', message: 'Timed out', screenshotName: '501.png', stepDetails: { action: 'Click on Pay' } }] }),
+      )
+      .on('GET', '/test_step_results/501', () => json({ id: 501, screenShotURL: 'https://storage.example.com/shots/501.png?sig=x' }))
+      .on('GET', '/shots/501.png', () => new Response(png, { status: 200 }));
+    const junitPath = join(dir, 'reports/junit.xml');
+    const f = fakeIo({ 'plan-id': '827', token: TOKEN, 'junit-path': junitPath });
+
+    await runAction(f.io, { fetch: server.fetch, ...fakeTime() });
+
+    const screenshot = join(dir, 'reports/contextqa-screenshots/2.png');
+    expect(new Uint8Array(await readFile(screenshot))).toEqual(png);
+    const xml = await readFile(junitPath, 'utf8');
+    expect(xml).toContain('Failed step: Click on Pay');
+    expect(xml).toContain(`[[ATTACHMENT|${screenshot}]]`);
+    expect(f.summaries[0]).toContain('Element not found: #submit (failed step: Click on Pay)');
+  });
+
   it('only reports when fail-on is never', async () => {
     const f = fakeIo({ 'plan-id': '827', token: TOKEN, 'fail-on': 'never' });
 
@@ -149,6 +171,31 @@ describe('renderSummary', () => {
     expect(md).toContain('| 2 | 1 | 1 | 0 | 0 | 0 | 6m 48s |');
     expect(md).toContain('| [a\\|b](https://t/1) | S | FAILURE | line1 line2 |');
     expect(md).toContain('[Open the full report in ContextQA](https://r/7)');
+  });
+
+  it("shows the run's wall-clock as its duration (CON-6433)", () => {
+    const markdown = renderSummary(
+      {
+        runId: 4512,
+        passed: true,
+        results: {
+          status: 'STATUS_COMPLETED',
+          result: 'SUCCESS',
+          duration: 3_600_000,
+          wallClockMs: 1_350_000,
+          totalCount: 5,
+          passedCount: 5,
+          failedCount: 0,
+          abortedCount: 0,
+          stoppedCount: 0,
+          notExecutedCount: 0,
+        },
+      },
+      '15',
+    );
+
+    expect(markdown).toContain('| 22m 30s |');
+    expect(markdown).not.toContain('59m');
   });
 
   it('explains missing per-test detail on a failed run', () => {

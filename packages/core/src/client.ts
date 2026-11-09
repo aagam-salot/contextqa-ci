@@ -1,6 +1,6 @@
 import { authHeaders } from './auth.js';
 import { AuthError, ConfigError, HttpError, InfraError } from './errors.js';
-import type { RunResults, TestCaseOutcome, TriggerResponse, UploadPair } from './types.js';
+import type { FailedStep, RunResults, TestCaseOutcome, TriggerResponse, UploadPair } from './types.js';
 
 const MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 1_000;
@@ -8,6 +8,9 @@ const ERROR_BODY_LIMIT = 500;
 const TEST_CASE_PAGE_SIZE = 100;
 /** A runaway pager must not spin forever; 100 pages is 10,000 test cases. */
 const MAX_TEST_CASE_PAGES = 100;
+/** Step results of one test case are read in a single page. */
+const STEP_RESULT_PAGE_SIZE = 1000;
+const FAILED_STEP_RESULTS = new Set(['FAILURE', 'ABORTED']);
 
 const HTTP_UNAUTHORIZED = 401;
 const HTTP_FORBIDDEN = 403;
@@ -84,10 +87,15 @@ export class ContextQAClient {
   async results(runId: number): Promise<RunResults> {
     const body = await this.getJson(`/test_plan_results/${runId}/results`, {}, true);
     const record = asRecord(body);
+    const startTime = timestampField(record, 'startTime');
+    const endTime = timestampField(record, 'endTime');
     return {
       status: stringField(record, 'status') ?? '',
       result: stringField(record, 'result') ?? '',
       duration: numberField(record, 'duration'),
+      startTime,
+      endTime,
+      wallClockMs: elapsedMs(startTime, endTime),
       totalCount: numberField(record, 'totalCount') ?? 0,
       passedCount: numberField(record, 'passedCount') ?? 0,
       failedCount: numberField(record, 'failedCount') ?? 0,
@@ -124,6 +132,39 @@ export class ContextQAClient {
       if (record['last'] !== false || content.length === 0) return outcomes;
     }
     return outcomes;
+  }
+
+  /**
+   * The first failed or aborted step of a test case result, or undefined when every step passed.
+   * Needs the `TEST_STEP_RESULTS_READ` permission.
+   */
+  async failedStep(testCaseResultId: number): Promise<FailedStep | undefined> {
+    const body = await this.getJson(
+      '/test_step_results',
+      { query: `testCaseResultId:${testCaseResultId}`, page: '0', size: String(STEP_RESULT_PAGE_SIZE), sort: 'id,asc' },
+      true,
+    );
+    const record = asRecord(body);
+    const content = Array.isArray(record['content']) ? record['content'] : [];
+    const failed = content.map(asRecord).find((row) => FAILED_STEP_RESULTS.has(stringField(row, 'result') ?? ''));
+    return failed ? toFailedStep(failed) : undefined;
+  }
+
+  /**
+   * A step's screenshot. The server hands out a short-lived signed storage URL, which is a credential:
+   * it is fetched without our token and never appears in a message.
+   */
+  async stepScreenshot(stepResultId: number): Promise<Uint8Array | undefined> {
+    const body = await this.getJson(`/test_step_results/${stepResultId}`, {}, true);
+    const signedUrl = stringField(asRecord(body), 'screenShotURL');
+    if (!signedUrl) return undefined;
+    return this.withRetries('screenshot download', async () => {
+      const response = await this.fetchFn(signedUrl);
+      if (!response.ok) {
+        throw new HttpError(response.status, 'screenshot download', '');
+      }
+      return new Uint8Array(await response.arrayBuffer());
+    });
   }
 
   private async getJson(path: string, params: QueryParams, retry: boolean): Promise<unknown> {
@@ -200,9 +241,11 @@ function toOutcome(row: Record<string, unknown>): TestCaseOutcome | undefined {
   const id = numberField(row, 'id');
   if (id === undefined || row['isPrerequisite'] === true) return undefined;
   const testCaseId = numberField(row, 'testCaseId');
+  // The test case's current name first, as the run report shows it; the name the result row saved
+  // at run time is only a fallback (it can be stale or a placeholder).
   const name =
-    stringField(asRecord(row['testCaseDetails']), 'name') ??
     stringField(asRecord(row['testCase']), 'name') ??
+    stringField(asRecord(row['testCaseDetails']), 'name') ??
     `Test case ${testCaseId ?? id}`;
   return {
     id,
@@ -215,6 +258,26 @@ function toOutcome(row: Record<string, unknown>): TestCaseOutcome | undefined {
   };
 }
 
+function toFailedStep(row: Record<string, unknown>): FailedStep | undefined {
+  const stepResultId = numberField(row, 'id');
+  if (stepResultId === undefined) return undefined;
+  const details = asRecord(row['stepDetails']);
+  return {
+    stepResultId,
+    step: stringField(details, 'action') ?? stringField(details, 'stepDescription') ?? '',
+    message: stringField(row, 'message') ?? '',
+    exception: stringField(row, 'webDriverException'),
+    hasScreenshot: stringField(row, 'screenshotName') !== undefined,
+  };
+}
+
+/** `end - start` in ms for two server timestamps; undefined when either is missing or unparseable. */
+function elapsedMs(start: string | undefined, end: string | undefined): number | undefined {
+  if (!start || !end) return undefined;
+  const elapsed = Date.parse(end) - Date.parse(start);
+  return Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -224,6 +287,12 @@ function asRecord(value: unknown): Record<string, unknown> {
 function stringField(record: Record<string, unknown>, name: string): string | undefined {
   const value = record[name];
   return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+/** A server timestamp as ISO-8601, whether it was sent as text or as epoch millis. */
+function timestampField(record: Record<string, unknown>, name: string): string | undefined {
+  const millis = numberField(record, name);
+  return millis === undefined ? stringField(record, name) : new Date(millis).toISOString();
 }
 
 function numberField(record: Record<string, unknown>, name: string): number | undefined {

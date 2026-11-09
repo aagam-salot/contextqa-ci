@@ -1,4 +1,4 @@
-import { ConfigError, FAIL_ON_VALUES, toBuildSource, type FailOn, type RunOptions } from '@contextqa/ci-core';
+import { ConfigError, FAIL_ON_VALUES, screenshotDirFor, toBuildSource, type FailOn, type RunOptions } from '@contextqa/ci-core';
 
 export const DEFAULT_API_URL = 'https://server.contextqa.com';
 const DEFAULT_TIMEOUT_SECONDS = 3600;
@@ -19,6 +19,7 @@ export function readInputs(getInput: (name: string) => string): ActionConfig {
     throw new ConfigError(`fail-on must be one of ${FAIL_ON_VALUES.join(', ')}`);
   }
 
+  const junitPath = value('junit-path');
   return {
     run: {
       apiUrl: value('api-url') ?? DEFAULT_API_URL,
@@ -30,9 +31,10 @@ export function readInputs(getInput: (name: string) => string): ActionConfig {
       wait: (value('wait') ?? 'true').toLowerCase() !== 'false',
       timeoutSeconds: seconds(value('timeout'), DEFAULT_TIMEOUT_SECONDS, 'timeout'),
       pollIntervalSeconds: seconds(value('poll-interval'), DEFAULT_POLL_INTERVAL_SECONDS, 'poll-interval'),
+      screenshotDir: junitPath ? screenshotDirFor(junitPath) : undefined,
     },
     failOn: failOn as FailOn,
-    junitPath: value('junit-path'),
+    junitPath,
   };
 }
 

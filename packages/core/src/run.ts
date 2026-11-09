@@ -1,6 +1,6 @@
 import { openAsBlob } from 'node:fs';
-import { stat } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { isApiToken } from './auth.js';
 import { ContextQAClient, defaultSleep, type ClientDeps, type SleepFn } from './client.js';
 import { AuthError, ConfigError, InfraError, RunTimeoutError } from './errors.js';
@@ -18,6 +18,9 @@ const MS_PER_SECOND = 1_000;
 const BYTES_PER_MB = 1024 * 1024;
 const PASSING_RESULT = 'SUCCESS';
 const PLAN_ID_PATTERN = /^\d+$/;
+const NOT_PASSING = new Set(['FAILURE', 'ABORTED']);
+/** Failure details cost two calls per failed test; past this many, the report link has the rest. */
+const MAX_FAILURE_DETAILS = 50;
 
 export interface RunDeps extends ClientDeps {
   now?: () => number;
@@ -53,6 +56,7 @@ export async function runTestPlan(options: RunOptions, reporter: Reporter, deps:
   const results = await waitForCompletion(client, reporter, trigger.id, trigger.url, options, sleep, now);
   const reportUrl = results.reportFileUrl ?? trigger.url;
   const testCases = await collectTestCases(client, reporter, trigger.id, options.token);
+  if (testCases) await addFailureDetails(client, reporter, testCases, options.screenshotDir);
   return {
     runId: trigger.id,
     reportUrl: reportUrl ?? undefined,
@@ -181,4 +185,65 @@ async function collectTestCases(
     }
     throw error;
   }
+}
+
+/**
+ * The failed step, its error and its screenshot for each failed test. Best-effort like the per-test
+ * results: nothing here can change the verdict, and without `TEST_STEP_RESULTS_READ` the report
+ * keeps the short message it had.
+ */
+async function addFailureDetails(
+  client: ContextQAClient,
+  reporter: Reporter,
+  testCases: TestCaseOutcome[],
+  screenshotDir: string | undefined,
+): Promise<void> {
+  const failing = testCases.filter((t) => NOT_PASSING.has(t.result)).slice(0, MAX_FAILURE_DETAILS);
+  for (const testCase of failing) {
+    try {
+      testCase.failedStep = await client.failedStep(testCase.id);
+    } catch (error) {
+      if (error instanceof AuthError) {
+        reporter.warn('Failure details skipped: the token lacks the TEST_STEP_RESULTS_READ permission.');
+      } else {
+        reporter.warn(`Failure details unavailable: ${errorText(error)}`);
+      }
+      return;
+    }
+    const step = testCase.failedStep;
+    if (screenshotDir && step?.hasScreenshot) {
+      testCase.screenshotPath = await saveScreenshot(client, reporter, screenshotDir, testCase.id, step.stepResultId);
+    }
+  }
+}
+
+async function saveScreenshot(
+  client: ContextQAClient,
+  reporter: Reporter,
+  dir: string,
+  testCaseResultId: number,
+  stepResultId: number,
+): Promise<string | undefined> {
+  try {
+    const image = await client.stepScreenshot(stepResultId);
+    if (!image) return undefined;
+    const path = join(dir, `${testCaseResultId}${imageExtension(image)}`);
+    await mkdir(dir, { recursive: true });
+    await writeFile(path, image);
+    return path;
+  } catch (error) {
+    reporter.warn(`Screenshot for test case result ${testCaseResultId} not saved: ${errorText(error)}`);
+    return undefined;
+  }
+}
+
+function imageExtension(image: Uint8Array): string {
+  const isPng = image[0] === 0x89 && image[1] === 0x50 && image[2] === 0x4e && image[3] === 0x47;
+  if (isPng) return '.png';
+  const isJpeg = image[0] === 0xff && image[1] === 0xd8;
+  return isJpeg ? '.jpg' : '.img';
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
