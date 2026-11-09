@@ -8,6 +8,7 @@ import {
   RunTimeoutError,
   exitCodeFor,
   failingTests,
+  failureText,
   renderSummary,
   runTestPlan,
   toBuildSource,
@@ -61,7 +62,7 @@ export async function runTask(io: TaskIo, deps: RunDeps = {}): Promise<void> {
     await writeFile(config.junitPath, toJUnitXml(summary, config.run.planId), 'utf8');
     if (config.publish) io.publishJUnit(config.junitPath, `ContextQA test plan ${config.run.planId}`);
     for (const t of failingTests(summary).slice(0, MAX_ISSUES)) {
-      io.error(`ContextQA: ${t.suite} › ${t.name}: ${t.message || t.result}`);
+      io.error(`ContextQA: ${t.suite} › ${t.name}: ${failureText(t)}`);
     }
 
     if (exitCodeFor(summary, config.failOn) !== ExitCode.PASSED) {

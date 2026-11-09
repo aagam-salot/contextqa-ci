@@ -57,8 +57,10 @@ jobs:
 Add `CONTEXTQA_TOKEN` under **Settings › Secrets and variables › Actions**. On every run you get:
 
 - the job failing unless the test plan passed,
-- a summary on the run page with counts, a link to the full ContextQA report, and each failing test case
-  linked to its trace,
+- a summary on the run page with counts, the run's **Duration** (start to end, as ContextQA's *Total Plan
+  Duration*) and its **Test execution time** (the tests' own time added up, as ContextQA's *Actual TC
+  Execution Time*), a link to the full ContextQA report, and each failing test case with its error and
+  failed step, linked to its trace,
 - an annotation for every failing test case,
 - outputs for later steps: `run-id`, `report-url`, `result`, `passed`, `total-count`, `passed-count`,
   `failed-count`.

@@ -20,9 +20,9 @@ export function renderSummary(summary: RunSummary, planId: string): string {
   lines.push(
     `${summary.passed ? '✅' : '❌'} **${r.result}** · run ${summary.runId}`,
     '',
-    '| Total | Passed | Failed | Aborted | Stopped | Not run | Duration |',
-    '|---:|---:|---:|---:|---:|---:|---:|',
-    `| ${r.totalCount} | ${r.passedCount} | ${r.failedCount} | ${r.abortedCount} | ${r.stoppedCount} | ${r.notExecutedCount} | ${duration(r.wallClockMs ?? r.duration ?? 0)} |`,
+    '| Total | Passed | Failed | Aborted | Stopped | Not run | Duration | Test execution time |',
+    '|---:|---:|---:|---:|---:|---:|---:|---:|',
+    `| ${r.totalCount} | ${r.passedCount} | ${r.failedCount} | ${r.abortedCount} | ${r.stoppedCount} | ${r.notExecutedCount} | ${duration(r.wallClockMs ?? r.duration ?? 0)} | ${executionTime(r.duration)} |`,
   );
   if (summary.reportUrl) lines.push('', `[Open the full report in ContextQA](${summary.reportUrl})`);
 
@@ -42,6 +42,11 @@ export function failingTests(summary: RunSummary): TestCaseOutcome[] {
   return (summary.testCases ?? []).filter((t) => NOT_PASSING.has(t.result));
 }
 
+/** What went wrong with a failing test: its short message, else its failed step's error, else its result. */
+export function failureText(t: TestCaseOutcome): string {
+  return t.message || t.failedStep?.message || t.result;
+}
+
 function row(t: TestCaseOutcome): string {
   const name = t.traceViewerUrl ? `[${cell(t.name)}](${t.traceViewerUrl})` : cell(t.name);
   const step = t.failedStep;
@@ -55,8 +60,18 @@ function cell(text: string): string {
   return text.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
+/**
+ * Sum of the test cases' own durations — ContextQA's "Actual TC Execution Time". Beside the run's
+ * wall-clock it shows how much of the run was test time: less when tests waited for a device, more
+ * when they ran in parallel.
+ */
+function executionTime(ms: number | null | undefined): string {
+  return typeof ms === 'number' ? duration(ms) : '—';
+}
+
+/** Whole seconds, rounded down like ContextQA's "Total Plan Duration". */
 function duration(ms: number): string {
-  const total = Math.round(ms / MS_PER_SECOND);
+  const total = Math.floor(ms / MS_PER_SECOND);
   const minutes = Math.floor(total / SECONDS_PER_MINUTE);
   return minutes > 0 ? `${minutes}m ${total % SECONDS_PER_MINUTE}s` : `${total}s`;
 }

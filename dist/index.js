@@ -20346,9 +20346,9 @@ function renderSummary(summary2, planId) {
   lines.push(
     `${summary2.passed ? "\u2705" : "\u274C"} **${r.result}** \xB7 run ${summary2.runId}`,
     "",
-    "| Total | Passed | Failed | Aborted | Stopped | Not run | Duration |",
-    "|---:|---:|---:|---:|---:|---:|---:|",
-    `| ${r.totalCount} | ${r.passedCount} | ${r.failedCount} | ${r.abortedCount} | ${r.stoppedCount} | ${r.notExecutedCount} | ${duration(r.wallClockMs ?? r.duration ?? 0)} |`
+    "| Total | Passed | Failed | Aborted | Stopped | Not run | Duration | Test execution time |",
+    "|---:|---:|---:|---:|---:|---:|---:|---:|",
+    `| ${r.totalCount} | ${r.passedCount} | ${r.failedCount} | ${r.abortedCount} | ${r.stoppedCount} | ${r.notExecutedCount} | ${duration(r.wallClockMs ?? r.duration ?? 0)} | ${executionTime(r.duration)} |`
   );
   if (summary2.reportUrl) lines.push("", `[Open the full report in ContextQA](${summary2.reportUrl})`);
   const failing = (summary2.testCases ?? []).filter((t) => NOT_PASSING2.has(t.result));
@@ -20364,6 +20364,9 @@ function renderSummary(summary2, planId) {
 function failingTests(summary2) {
   return (summary2.testCases ?? []).filter((t) => NOT_PASSING2.has(t.result));
 }
+function failureText(t) {
+  return t.message || t.failedStep?.message || t.result;
+}
 function row(t) {
   const name = t.traceViewerUrl ? `[${cell(t.name)}](${t.traceViewerUrl})` : cell(t.name);
   const step = t.failedStep;
@@ -20373,8 +20376,11 @@ function row(t) {
 function cell(text) {
   return text.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 }
+function executionTime(ms) {
+  return typeof ms === "number" ? duration(ms) : "\u2014";
+}
 function duration(ms) {
-  const total = Math.round(ms / MS_PER_SECOND3);
+  const total = Math.floor(ms / MS_PER_SECOND3);
   const minutes = Math.floor(total / SECONDS_PER_MINUTE);
   return minutes > 0 ? `${minutes}m ${total % SECONDS_PER_MINUTE}s` : `${total}s`;
 }
@@ -20429,7 +20435,7 @@ async function runAction(io, deps = {}) {
       await writeFile3(config.junitPath, toJUnitXml(summary2, config.run.planId), "utf8");
     }
     for (const t of failingTests(summary2).slice(0, MAX_ANNOTATIONS)) {
-      io.error(t.message || t.result, { title: `ContextQA: ${t.suite} \u203A ${t.name}` });
+      io.error(failureText(t), { title: `ContextQA: ${t.suite} \u203A ${t.name}` });
     }
     if (exitCodeFor(summary2, config.failOn) !== ExitCode2.PASSED) {
       io.setFailed(`Test plan ${config.run.planId} result was ${summary2.results?.result ?? "unknown"}`);

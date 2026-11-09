@@ -173,6 +173,81 @@ describe('renderSummary', () => {
     expect(md).toContain('[Open the full report in ContextQA](https://r/7)');
   });
 
+  it('shows the run time and the test execution time side by side, rounded down like ContextQA (CON-6433)', () => {
+    const markdown = renderSummary(
+      {
+        runId: 7,
+        passed: false,
+        results: {
+          status: 'STATUS_COMPLETED',
+          result: 'FAILURE',
+          duration: 295_340,
+          wallClockMs: 610_946,
+          totalCount: 7,
+          passedCount: 4,
+          failedCount: 3,
+          abortedCount: 0,
+          stoppedCount: 0,
+          notExecutedCount: 0,
+        },
+      },
+      '2',
+    );
+
+    expect(markdown).toContain('| Total | Passed | Failed | Aborted | Stopped | Not run | Duration | Test execution time |');
+    expect(markdown).toContain('| 7 | 4 | 3 | 0 | 0 | 0 | 10m 10s | 4m 55s |');
+  });
+
+  it('shows a dash for the test execution time when the server sends none', () => {
+    const markdown = renderSummary(
+      {
+        runId: 7,
+        passed: true,
+        results: {
+          status: 'STATUS_COMPLETED',
+          result: 'SUCCESS',
+          duration: null,
+          wallClockMs: 5_000,
+          totalCount: 1,
+          passedCount: 1,
+          failedCount: 0,
+          abortedCount: 0,
+          stoppedCount: 0,
+          notExecutedCount: 0,
+        },
+      },
+      '2',
+    );
+
+    expect(markdown).toContain('| 1 | 1 | 0 | 0 | 0 | 0 | 5s | — |');
+  });
+
+  it("annotates a failing test with its failed step's error when it has no short message (CON-6433)", async () => {
+    const server = new FakeServer()
+      .on('GET', '/test_plans/827/execution', () => json({ id: 77 }))
+      .on('GET', '/test_plan_results/77/results', () => json(results({ result: 'FAILURE', passedCount: 0, failedCount: 1 })))
+      .on('GET', '/test_case_results', () =>
+        json({
+          content: [
+            {
+              id: 3,
+              result: 'FAILURE',
+              shortMessage: null,
+              testCase: { name: 'Reject short password' },
+              testSuite: { name: 'Signup' },
+              executedResult: { failed_test_steps: [{ humanReadableText: 'Verify the hint', reason: 'The hint is not shown' }] },
+            },
+          ],
+          last: true,
+        }),
+      );
+    const f = fakeIo({ 'plan-id': '827', token: TOKEN });
+
+    await runAction(f.io, { fetch: server.fetch, ...fakeTime() });
+
+    expect(f.errors).toEqual([{ message: 'The hint is not shown', title: 'ContextQA: Signup › Reject short password' }]);
+  });
+
   it("shows the run's wall-clock as its duration (CON-6433)", () => {
     const markdown = renderSummary(
       {

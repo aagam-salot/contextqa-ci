@@ -6,6 +6,7 @@ import {
   RunTimeoutError,
   exitCodeFor,
   failingTests,
+  failureText,
   renderSummary,
   runTestPlan,
   toJUnitXml,
@@ -44,7 +45,7 @@ export async function runAction(io: ActionIo, deps: RunDeps = {}): Promise<void>
       await writeFile(config.junitPath, toJUnitXml(summary, config.run.planId), 'utf8');
     }
     for (const t of failingTests(summary).slice(0, MAX_ANNOTATIONS)) {
-      io.error(t.message || t.result, { title: `ContextQA: ${t.suite} › ${t.name}` });
+      io.error(failureText(t), { title: `ContextQA: ${t.suite} › ${t.name}` });
     }
 
     if (exitCodeFor(summary, config.failOn) !== ExitCode.PASSED) {

@@ -69,6 +69,32 @@ describe('runTask', () => {
     expect(f.junit).toHaveLength(1);
   });
 
+  it("raises the failed step's error when a failing test has no short message (CON-6433)", async () => {
+    const temp = await mkdtemp(join(tmpdir(), 'cqa-azure-'));
+    const s = new FakeServer()
+      .on('GET', '/test_plans/827/execution', () => json({ id: 77 }))
+      .on('GET', '/test_plan_results/77/results', () => json(results({ result: 'FAILURE', failedCount: 1 })))
+      .on('GET', '/test_case_results', () =>
+        json({
+          content: [
+            {
+              id: 3,
+              result: 'FAILURE',
+              testCase: { name: 'Pay' },
+              testSuite: { name: 'Checkout' },
+              executedResult: { failed_test_steps: [{ humanReadableText: 'Click on Pay', reason: 'The Pay button is not on the screen' }] },
+            },
+          ],
+          last: true,
+        }),
+      );
+    const f = fakeIo({ planId: '827', token: TOKEN }, { AGENT_TEMPDIRECTORY: temp });
+
+    await runTask(f.io, { fetch: s.fetch, ...fakeTime() });
+
+    expect(f.errors).toEqual(['ContextQA: Checkout › Pay: The Pay button is not on the screen']);
+  });
+
   it('takes the token from the environment when the input is empty', async () => {
     const temp = await mkdtemp(join(tmpdir(), 'cqa-azure-'));
     const s = server();
