@@ -19,7 +19,7 @@ pipelines:
 ```
 
 1. Add `CONTEXTQA_TOKEN` as a **secured** repository or deployment variable. Use an API token with
-   `TEST_PLAN_EXECUTE` (which also covers build uploads) and `TEST_PLAN_RESULTS_READ`, plus `TEST_CASE_RESULTS_READ` for per-test results and `TEST_STEP_RESULTS_READ` for each failure's step and error.
+   `TEST_PLAN_EXECUTE` (which also covers build uploads) and `TEST_PLAN_RESULTS_READ`, plus `TEST_CASE_RESULTS_READ` for per-test results and failure details (optionally `TEST_STEP_RESULTS_READ` for older runs' failure details).
 2. Keep `CONTEXTQA_JUNIT_PATH` under `test-results/`. Bitbucket reads JUnit from there automatically and
    shows failures on the step's **Tests** tab.
 

@@ -132,6 +132,22 @@ describe('toJUnitXml (CON-6433)', () => {
     expect(xml).toContain('<system-out>[[ATTACHMENT|reports/contextqa-screenshots/2.png]]</system-out>');
   });
 
+  it('adds the step number, expected result and failure type when known', () => {
+    const failedStep = {
+      stepIndex: 3,
+      step: 'Click on Pay',
+      message: 'The Pay button is not on the screen',
+      expected: 'The order is paid',
+      type: 'ELEMENT_NOT_FOUND',
+      hasScreenshot: false,
+    };
+    const xml = toJUnitXml({ runId: 9, results: baseResults, passed: false, testCases: [outcome(2, 'FAILURE', { failedStep })] }, '827');
+
+    expect(xml).toContain(
+      '<failure message="The Pay button is not on the screen" type="FAILURE">Failed step 3: Click on Pay\nError: The Pay button is not on the screen\nExpected: The order is paid\nType: ELEMENT_NOT_FOUND</failure>',
+    );
+  });
+
   it("uses the failed step's error when the result has no message of its own", () => {
     const failedStep = { stepResultId: 501, step: 'Open login', message: 'Page did not load', hasScreenshot: false };
     const xml = toJUnitXml({ runId: 9, results: baseResults, passed: false, testCases: [outcome(2, 'FAILURE', { failedStep })] }, '827');

@@ -388,7 +388,7 @@ describe('runTestPlan reports for CI (CON-6433)', () => {
     expect(summary.testCases?.every((t) => t.failedStep === undefined && t.screenshotPath === undefined)).toBe(true);
     expect(summary.testCases?.[0]?.message).toBe('Element not found: #submit');
     expect(fake.calls('/test_step_results')).toHaveLength(1);
-    expect(reporter.lines).toContain('WARN Failure details skipped: the token lacks the TEST_STEP_RESULTS_READ permission.');
+    expect(reporter.lines).toContain('WARN Step results skipped: the token lacks the TEST_STEP_RESULTS_READ permission.');
   });
 
   it('adds the failed step but downloads nothing when no screenshot folder is given', async () => {
@@ -419,6 +419,127 @@ describe('runTestPlan reports for CI (CON-6433)', () => {
     expect(summary.testCases?.[0]?.screenshotPath).toBeUndefined();
     expect(reporter.lines.some((l) => l.startsWith('WARN Screenshot for test case result 2 not saved'))).toBe(true);
     expect(reporter.lines.join('\n')).not.toContain('SECRET');
+  });
+
+  /** A failed result row as the current execution engine writes it (shape from a real run, values made up). */
+  function engineFailedRow(id: number, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return testCaseRow(id, 'FAILURE', {
+      shortMessage: null,
+      message: '',
+      executedResult: {
+        failed_test_steps: [
+          {
+            humanReadableText: 'Click on Pay',
+            reason: 'The Pay button is not on the screen',
+            actual_result: 'The Pay button is not on the screen',
+            expected_result: 'The order is paid',
+            failed_step_index: '3',
+            type: 'ELEMENT_NOT_FOUND',
+            stepScreenshotUrl: null,
+          },
+        ],
+        cqa_failureContext: { error: { outputMessage: 'context message' }, failure_classification: { category: 'element_not_found' } },
+      },
+      ...extra,
+    });
+  }
+
+  it("reads the failed step from the result row itself, with no extra call and no extra permission", async () => {
+    const fake = server([engineFailedRow(2)], { result: 'FAILURE' });
+
+    const summary = await runTestPlan(options(), recordingReporter(), { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.testCases?.[0]?.failedStep).toEqual({
+      stepIndex: 3,
+      step: 'Click on Pay',
+      message: 'The Pay button is not on the screen',
+      expected: 'The order is paid',
+      type: 'ELEMENT_NOT_FOUND',
+      hasScreenshot: false,
+    });
+    expect(fake.calls('/test_step_results')).toHaveLength(0);
+  });
+
+  it('reads executedResult sent as a JSON string, and falls back to the failure context message', async () => {
+    const executedResult = JSON.stringify({ failed_test_steps: [], cqa_failureContext: { error: { outputMessage: 'context message' } } });
+    const fake = server([testCaseRow(2, 'FAILURE', { shortMessage: null, executedResult })], { result: 'FAILURE' });
+
+    const summary = await runTestPlan(options(), recordingReporter(), { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.testCases?.[0]?.failedStep?.message).toBe('context message');
+  });
+
+  it("downloads the screenshot the result row links, keeping the signed URL out of the summary", async () => {
+    const dir = join(await mkdtemp(join(tmpdir(), 'cqa-shots-')), 'contextqa-screenshots');
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 1]);
+    const row = engineFailedRow(2);
+    (row['executedResult'] as { failed_test_steps: Record<string, unknown>[] }).failed_test_steps[0]!['stepScreenshotUrl'] =
+      'https://storage.example.com/shots/2.jpg?X-Amz-Signature=SECRET';
+    const fake = server([row], { result: 'FAILURE' }).on('GET', '/shots/2.jpg', () => new Response(jpeg, { status: 200 }));
+    const reporter = recordingReporter();
+
+    const summary = await runTestPlan(options({ screenshotDir: dir }), reporter, { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.testCases?.[0]?.screenshotPath).toBe(join(dir, '2.jpg'));
+    expect(new Uint8Array(await readFile(join(dir, '2.jpg')))).toEqual(jpeg);
+    expect(fake.calls('/test_step_results')).toHaveLength(0);
+    expect(fake.calls('/shots/2.jpg')[0]!.headers.get('authorization')).toBeNull();
+    expect(JSON.stringify(summary)).not.toContain('SECRET');
+    expect(reporter.lines.join('\n')).not.toContain('SECRET');
+  });
+
+  it("takes the screenshot from the step row's ready URL when the result row links none", async () => {
+    const dir = join(await mkdtemp(join(tmpdir(), 'cqa-shots-')), 'contextqa-screenshots');
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 2]);
+    const fake = server([engineFailedRow(2)], { result: 'FAILURE' })
+      .on('GET', '/test_step_results', () =>
+        json({
+          content: [
+            {
+              id: 801,
+              result: 'FAILURE',
+              stepDetails: {},
+              message: null,
+              screenshotName: 'https://storage.example.com/shots/801.png?sig=SECRET',
+              screenshots: { before: 'https://storage.example.com/shots/801-before.png?sig=SECRET' },
+            },
+          ],
+        }),
+      )
+      .on('GET', '/shots/801.png', () => new Response(png, { status: 200 }));
+
+    const summary = await runTestPlan(options({ screenshotDir: dir }), recordingReporter(), { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.testCases?.[0]?.failedStep?.step).toBe('Click on Pay');
+    expect(summary.testCases?.[0]?.failedStep?.hasScreenshot).toBe(true);
+    expect(summary.testCases?.[0]?.screenshotPath).toBe(join(dir, '2.png'));
+    expect(fake.calls('/test_step_results/801')).toHaveLength(0);
+    expect(JSON.stringify(summary)).not.toContain('SECRET');
+  });
+
+  it("reads an older run's error from the step's log when its message is empty", async () => {
+    const fake = server([testCaseRow(2, 'FAILURE', { shortMessage: null })], { result: 'FAILURE' }).on('GET', '/test_step_results', () =>
+      json({
+        content: [
+          {
+            id: 801,
+            result: 'FAILURE',
+            stepDetails: {},
+            logsList: {
+              logs: [
+                { uiType: 'AI_AGENT_ACTION', status: 'passed', text: 'Opened the app' },
+                { uiType: 'STOP', status: 'failed', text: 'None', value: 'The screen shows another app' },
+                { uiType: 'DONE', status: 'passed', text: 'None' },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+
+    const summary = await runTestPlan(options(), recordingReporter(), { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.testCases?.[0]?.failedStep?.message).toBe('The screen shows another app');
   });
 
   it('makes no step-result calls for a passing run', async () => {

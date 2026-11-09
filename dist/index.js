@@ -19726,6 +19726,10 @@ var HTTP_NOT_FOUND = 404;
 var HTTP_TOO_MANY_REQUESTS = 429;
 var HTTP_SERVER_ERROR_MIN = 500;
 var defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+var screenshotUrls = /* @__PURE__ */ new WeakMap();
+function screenshotUrlOf(holder) {
+  return holder ? screenshotUrls.get(holder) : void 0;
+}
 var ContextQAClient = class {
   constructor(apiUrl, token, deps = {}) {
     this.token = token;
@@ -19836,7 +19840,10 @@ var ContextQAClient = class {
   async stepScreenshot(stepResultId) {
     const body = await this.getJson(`/test_step_results/${stepResultId}`, {}, true);
     const signedUrl = stringField(asRecord(body), "screenShotURL");
-    if (!signedUrl) return void 0;
+    return signedUrl ? this.downloadImage(signedUrl) : void 0;
+  }
+  /** Downloads an image from a signed storage URL: without our token, and never naming the URL. */
+  async downloadImage(signedUrl) {
     return this.withRetries("screenshot download", async () => {
       const response = await this.fetchFn(signedUrl);
       if (!response.ok) {
@@ -19912,7 +19919,7 @@ function toOutcome(row2) {
   if (id === void 0 || row2["isPrerequisite"] === true) return void 0;
   const testCaseId = numberField(row2, "testCaseId");
   const name = stringField(asRecord(row2["testCase"]), "name") ?? stringField(asRecord(row2["testCaseDetails"]), "name") ?? `Test case ${testCaseId ?? id}`;
-  return {
+  const outcome = {
     id,
     name,
     suite: stringField(asRecord(row2["testSuite"]), "name") ?? "ContextQA",
@@ -19921,18 +19928,75 @@ function toOutcome(row2) {
     message: stringField(row2, "shortMessage") ?? stringField(row2, "message") ?? "",
     traceViewerUrl: stringField(row2, "traceViewerUrl")
   };
+  const executedResult = asRecord(parseJsonField(row2["executedResult"]));
+  const failedStep = embeddedFailedStep(executedResult);
+  if (failedStep) {
+    outcome.failedStep = failedStep.step;
+    if (failedStep.screenshotUrl) screenshotUrls.set(outcome, failedStep.screenshotUrl);
+  }
+  return outcome;
+}
+function embeddedFailedStep(executedResult) {
+  const failedSteps = Array.isArray(executedResult["failed_test_steps"]) ? executedResult["failed_test_steps"] : [];
+  const first = asRecord(failedSteps[0]);
+  const failureContext = asRecord(executedResult["cqa_failureContext"]);
+  const contextError = stringField(asRecord(failureContext["error"]), "outputMessage");
+  const message = stringField(first, "reason") ?? stringField(first, "actual_result") ?? contextError;
+  const step = stringField(first, "humanReadableText") ?? firstString(first["steps"]) ?? "";
+  if (!message && !step) return void 0;
+  const screenshotUrl = httpUrl(stringField(first, "stepScreenshotUrl"));
+  return {
+    step: {
+      stepIndex: integerField(first, "failed_step_index"),
+      step,
+      message: message ?? "",
+      expected: stringField(first, "expected_result"),
+      type: stringField(first, "type") ?? stringField(asRecord(failureContext["failure_classification"]), "category"),
+      hasScreenshot: screenshotUrl !== void 0
+    },
+    screenshotUrl
+  };
 }
 function toFailedStep(row2) {
   const stepResultId = numberField(row2, "id");
   if (stepResultId === void 0) return void 0;
   const details = asRecord(row2["stepDetails"]);
-  return {
+  const screenshotName = stringField(row2, "screenshotName");
+  const screenshotUrl = httpUrl(screenshotName) ?? httpUrl(stringField(asRecord(parseJsonField(row2["screenshots"])), "after")) ?? httpUrl(stringField(asRecord(parseJsonField(row2["screenshots"])), "before"));
+  const failedStep = {
     stepResultId,
     step: stringField(details, "action") ?? stringField(details, "stepDescription") ?? "",
-    message: stringField(row2, "message") ?? "",
+    message: stringField(row2, "message") ?? failedLogText(row2["logsList"]) ?? "",
     exception: stringField(row2, "webDriverException"),
-    hasScreenshot: stringField(row2, "screenshotName") !== void 0
+    hasScreenshot: screenshotName !== void 0 || screenshotUrl !== void 0
   };
+  if (screenshotUrl) screenshotUrls.set(failedStep, screenshotUrl);
+  return failedStep;
+}
+function failedLogText(logsList) {
+  const parsed = parseJsonField(logsList);
+  const entries = Array.isArray(parsed) ? parsed : Array.isArray(asRecord(parsed)["logs"]) ? asRecord(parsed)["logs"] : [];
+  const failed = entries.map(asRecord).filter((entry) => stringField(entry, "status") === "failed");
+  const last = failed[failed.length - 1];
+  if (!last) return void 0;
+  return meaningful(stringField(last, "text")) ?? meaningful(stringField(last, "value"));
+}
+function meaningful(value) {
+  return value && value !== "None" ? value : void 0;
+}
+function parseJsonField(value) {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return void 0;
+  }
+}
+function firstString(value) {
+  return Array.isArray(value) && typeof value[0] === "string" && value[0] !== "" ? value[0] : void 0;
+}
+function httpUrl(value) {
+  return value && /^https?:\/\//i.test(value) ? value : void 0;
 }
 function elapsedMs(start, end) {
   if (!start || !end) return void 0;
@@ -19949,6 +20013,11 @@ function stringField(record, name) {
 function timestampField(record, name) {
   const millis = numberField(record, name);
   return millis === void 0 ? stringField(record, name) : new Date(millis).toISOString();
+}
+function integerField(record, name) {
+  const value = record[name];
+  const parsed = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value;
+  return typeof parsed === "number" && Number.isInteger(parsed) ? parsed : void 0;
 }
 function numberField(record, name) {
   const value = record[name];
@@ -20009,8 +20078,10 @@ function renderCase(suite, testCase, reportUrl) {
   const message = testCase.message || step?.message || testCase.result || "no result";
   const detail = [
     testCase.message,
-    step?.step ? `Failed step: ${step.step}` : "",
+    step?.step ? `Failed step${step.stepIndex ? ` ${step.stepIndex}` : ""}: ${step.step}` : "",
     step?.message && step.message !== testCase.message ? `Error: ${step.message}` : "",
+    step?.expected && step.expected !== step.step ? `Expected: ${step.expected}` : "",
+    step?.type ? `Type: ${step.type}` : "",
     step?.exception ? `Exception: ${step.exception}` : "",
     testCase.traceViewerUrl ? `Trace: ${testCase.traceViewerUrl}` : "",
     step && reportUrl ? `Report: ${reportUrl}` : ""
@@ -20210,33 +20281,42 @@ async function collectTestCases(client, reporter, runId, token) {
 }
 async function addFailureDetails(client, reporter, testCases, screenshotDir) {
   const failing = testCases.filter((t) => NOT_PASSING.has(t.result)).slice(0, MAX_FAILURE_DETAILS);
+  let canReadSteps = true;
   for (const testCase of failing) {
-    try {
-      testCase.failedStep = await client.failedStep(testCase.id);
-    } catch (error2) {
-      if (error2 instanceof AuthError) {
-        reporter.warn("Failure details skipped: the token lacks the TEST_STEP_RESULTS_READ permission.");
-      } else {
-        reporter.warn(`Failure details unavailable: ${errorText(error2)}`);
+    const needsStepRow = !testCase.failedStep || screenshotDir !== void 0 && !screenshotUrlOf(testCase);
+    let stepRow;
+    if (needsStepRow && canReadSteps) {
+      try {
+        stepRow = await client.failedStep(testCase.id);
+      } catch (error2) {
+        canReadSteps = false;
+        if (error2 instanceof AuthError) {
+          reporter.warn("Step results skipped: the token lacks the TEST_STEP_RESULTS_READ permission.");
+        } else {
+          reporter.warn(`Step results unavailable: ${errorText(error2)}`);
+        }
       }
-      return;
     }
-    const step = testCase.failedStep;
-    if (screenshotDir && step?.hasScreenshot) {
-      testCase.screenshotPath = await saveScreenshot(client, reporter, screenshotDir, testCase.id, step.stepResultId);
+    testCase.failedStep ??= stepRow;
+    if (screenshotDir) {
+      testCase.screenshotPath = await saveScreenshot(client, reporter, screenshotDir, testCase, stepRow);
+      if (testCase.screenshotPath && testCase.failedStep) testCase.failedStep.hasScreenshot = true;
     }
   }
 }
-async function saveScreenshot(client, reporter, dir, testCaseResultId, stepResultId) {
+async function saveScreenshot(client, reporter, dir, testCase, stepRow) {
+  const signedUrl = screenshotUrlOf(testCase) ?? screenshotUrlOf(stepRow);
+  const stepResultId = stepRow?.hasScreenshot ? stepRow.stepResultId : void 0;
+  if (!signedUrl && stepResultId === void 0) return void 0;
   try {
-    const image = await client.stepScreenshot(stepResultId);
+    const image = signedUrl ? await client.downloadImage(signedUrl) : await client.stepScreenshot(stepResultId);
     if (!image) return void 0;
-    const path = join2(dir, `${testCaseResultId}${imageExtension(image)}`);
+    const path = join2(dir, `${testCase.id}${imageExtension(image)}`);
     await mkdir2(dir, { recursive: true });
     await writeFile2(path, image);
     return path;
   } catch (error2) {
-    reporter.warn(`Screenshot for test case result ${testCaseResultId} not saved: ${errorText(error2)}`);
+    reporter.warn(`Screenshot for test case result ${testCase.id} not saved: ${errorText(error2)}`);
     return void 0;
   }
 }

@@ -11,7 +11,7 @@ inputs:
     required: true
   token:
     description: >
-      ContextQA API token (token_…), from a secret. Give it TEST_PLAN_EXECUTE (which also covers build uploads) and TEST_PLAN_RESULTS_READ, plus TEST_CASE_RESULTS_READ for per-test results and TEST_STEP_RESULTS_READ for each failure's step and screenshot.
+      ContextQA API token (token_…), from a secret. Give it TEST_PLAN_EXECUTE (which also covers build uploads) and TEST_PLAN_RESULTS_READ, plus TEST_CASE_RESULTS_READ for per-test results and failure details, and optionally TEST_STEP_RESULTS_READ for failed-step screenshots.
       A legacy CI token also works, with counts only.
     required: true
   api-url:

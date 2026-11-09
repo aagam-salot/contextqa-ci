@@ -58,8 +58,10 @@ function renderCase(suite: string, testCase: TestCaseOutcome, reportUrl: string 
   const message = testCase.message || step?.message || testCase.result || 'no result';
   const detail = [
     testCase.message,
-    step?.step ? `Failed step: ${step.step}` : '',
+    step?.step ? `Failed step${step.stepIndex ? ` ${step.stepIndex}` : ''}: ${step.step}` : '',
     step?.message && step.message !== testCase.message ? `Error: ${step.message}` : '',
+    step?.expected && step.expected !== step.step ? `Expected: ${step.expected}` : '',
+    step?.type ? `Type: ${step.type}` : '',
     step?.exception ? `Exception: ${step.exception}` : '',
     testCase.traceViewerUrl ? `Trace: ${testCase.traceViewerUrl}` : '',
     step && reportUrl ? `Report: ${reportUrl}` : '',

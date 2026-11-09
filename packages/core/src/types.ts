@@ -59,12 +59,21 @@ export interface TestCaseOutcome {
   screenshotPath?: string;
 }
 
-/** The first failed step of a test case result (`GET /test_step_results`). */
+/**
+ * The first failed step of a test case result: from the result row's `executedResult.failed_test_steps`
+ * (current execution engine), else from `GET /test_step_results` (older runs).
+ */
 export interface FailedStep {
-  stepResultId: number;
+  /** The step result row, when the step came from `GET /test_step_results`. */
+  stepResultId?: number;
+  /** 1-based position of the step in the test case, when known. */
+  stepIndex?: number;
   /** What the step does, as written in the test case. */
   step: string;
   message: string;
+  expected?: string;
+  /** Failure type, e.g. `ELEMENT_NOT_FOUND`. */
+  type?: string;
   exception?: string;
   hasScreenshot: boolean;
 }

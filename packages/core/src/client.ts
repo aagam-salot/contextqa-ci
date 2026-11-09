@@ -23,6 +23,17 @@ export type SleepFn = (ms: number) => Promise<void>;
 
 export const defaultSleep: SleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Screenshot URLs found in a response, kept beside the outcome instead of on it: they are short-lived
+ * signed storage URLs, and the summary is written to disk (`--json`) and often uploaded.
+ */
+const screenshotUrls = new WeakMap<object, string>();
+
+/** The screenshot URL the server sent for a failed test case or step, if any. */
+export function screenshotUrlOf(holder: object | undefined): string | undefined {
+  return holder ? screenshotUrls.get(holder) : undefined;
+}
+
 export interface ClientDeps {
   fetch?: FetchFn;
   sleep?: SleepFn;
@@ -157,7 +168,11 @@ export class ContextQAClient {
   async stepScreenshot(stepResultId: number): Promise<Uint8Array | undefined> {
     const body = await this.getJson(`/test_step_results/${stepResultId}`, {}, true);
     const signedUrl = stringField(asRecord(body), 'screenShotURL');
-    if (!signedUrl) return undefined;
+    return signedUrl ? this.downloadImage(signedUrl) : undefined;
+  }
+
+  /** Downloads an image from a signed storage URL: without our token, and never naming the URL. */
+  async downloadImage(signedUrl: string): Promise<Uint8Array> {
     return this.withRetries('screenshot download', async () => {
       const response = await this.fetchFn(signedUrl);
       if (!response.ok) {
@@ -247,7 +262,7 @@ function toOutcome(row: Record<string, unknown>): TestCaseOutcome | undefined {
     stringField(asRecord(row['testCase']), 'name') ??
     stringField(asRecord(row['testCaseDetails']), 'name') ??
     `Test case ${testCaseId ?? id}`;
-  return {
+  const outcome: TestCaseOutcome = {
     id,
     name,
     suite: stringField(asRecord(row['testSuite']), 'name') ?? 'ContextQA',
@@ -256,19 +271,92 @@ function toOutcome(row: Record<string, unknown>): TestCaseOutcome | undefined {
     message: stringField(row, 'shortMessage') ?? stringField(row, 'message') ?? '',
     traceViewerUrl: stringField(row, 'traceViewerUrl'),
   };
+  const executedResult = asRecord(parseJsonField(row['executedResult']));
+  const failedStep = embeddedFailedStep(executedResult);
+  if (failedStep) {
+    outcome.failedStep = failedStep.step;
+    if (failedStep.screenshotUrl) screenshotUrls.set(outcome, failedStep.screenshotUrl);
+  }
+  return outcome;
+}
+
+/**
+ * The failed step the current execution engine records on the result row itself
+ * (`executedResult.failed_test_steps`, with `cqa_failureContext` as the fallback for the error).
+ */
+function embeddedFailedStep(executedResult: Record<string, unknown>): { step: FailedStep; screenshotUrl?: string } | undefined {
+  const failedSteps = Array.isArray(executedResult['failed_test_steps']) ? executedResult['failed_test_steps'] : [];
+  const first = asRecord(failedSteps[0]);
+  const failureContext = asRecord(executedResult['cqa_failureContext']);
+  const contextError = stringField(asRecord(failureContext['error']), 'outputMessage');
+  const message = stringField(first, 'reason') ?? stringField(first, 'actual_result') ?? contextError;
+  const step = stringField(first, 'humanReadableText') ?? firstString(first['steps']) ?? '';
+  if (!message && !step) return undefined;
+  const screenshotUrl = httpUrl(stringField(first, 'stepScreenshotUrl'));
+  return {
+    step: {
+      stepIndex: integerField(first, 'failed_step_index'),
+      step,
+      message: message ?? '',
+      expected: stringField(first, 'expected_result'),
+      type: stringField(first, 'type') ?? stringField(asRecord(failureContext['failure_classification']), 'category'),
+      hasScreenshot: screenshotUrl !== undefined,
+    },
+    screenshotUrl,
+  };
 }
 
 function toFailedStep(row: Record<string, unknown>): FailedStep | undefined {
   const stepResultId = numberField(row, 'id');
   if (stepResultId === undefined) return undefined;
   const details = asRecord(row['stepDetails']);
-  return {
+  const screenshotName = stringField(row, 'screenshotName');
+  // Newer runs store a ready signed URL here (or in `screenshots`) instead of a file name.
+  const screenshotUrl =
+    httpUrl(screenshotName) ??
+    httpUrl(stringField(asRecord(parseJsonField(row['screenshots'])), 'after')) ??
+    httpUrl(stringField(asRecord(parseJsonField(row['screenshots'])), 'before'));
+  const failedStep: FailedStep = {
     stepResultId,
     step: stringField(details, 'action') ?? stringField(details, 'stepDescription') ?? '',
-    message: stringField(row, 'message') ?? '',
+    message: stringField(row, 'message') ?? failedLogText(row['logsList']) ?? '',
     exception: stringField(row, 'webDriverException'),
-    hasScreenshot: stringField(row, 'screenshotName') !== undefined,
+    hasScreenshot: screenshotName !== undefined || screenshotUrl !== undefined,
   };
+  if (screenshotUrl) screenshotUrls.set(failedStep, screenshotUrl);
+  return failedStep;
+}
+
+/** The text of the last failed entry in a step's `logsList`, where newer runs record the error. */
+function failedLogText(logsList: unknown): string | undefined {
+  const parsed = parseJsonField(logsList);
+  const entries = Array.isArray(parsed) ? parsed : Array.isArray(asRecord(parsed)['logs']) ? (asRecord(parsed)['logs'] as unknown[]) : [];
+  const failed = entries.map(asRecord).filter((entry) => stringField(entry, 'status') === 'failed');
+  const last = failed[failed.length - 1];
+  if (!last) return undefined;
+  return meaningful(stringField(last, 'text')) ?? meaningful(stringField(last, 'value'));
+}
+
+/** The engine writes the string "None" for an empty log field. */
+function meaningful(value: string | undefined): string | undefined {
+  return value && value !== 'None' ? value : undefined;
+}
+
+function parseJsonField(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function firstString(value: unknown): string | undefined {
+  return Array.isArray(value) && typeof value[0] === 'string' && value[0] !== '' ? value[0] : undefined;
+}
+
+function httpUrl(value: string | undefined): string | undefined {
+  return value && /^https?:\/\//i.test(value) ? value : undefined;
 }
 
 /** `end - start` in ms for two server timestamps; undefined when either is missing or unparseable. */
@@ -293,6 +381,13 @@ function stringField(record: Record<string, unknown>, name: string): string | un
 function timestampField(record: Record<string, unknown>, name: string): string | undefined {
   const millis = numberField(record, name);
   return millis === undefined ? stringField(record, name) : new Date(millis).toISOString();
+}
+
+/** A whole number sent either as a JSON number or as text (`"3"`). */
+function integerField(record: Record<string, unknown>, name: string): number | undefined {
+  const value = record[name];
+  const parsed = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  return typeof parsed === 'number' && Number.isInteger(parsed) ? parsed : undefined;
 }
 
 function numberField(record: Record<string, unknown>, name: string): number | undefined {

@@ -30,7 +30,7 @@ You need two things from ContextQA:
    | `TEST_PLAN_EXECUTE` | starting the run, and uploading a mobile build (required) |
    | `TEST_PLAN_RESULTS_READ` | waiting for the result (required) |
    | `TEST_CASE_RESULTS_READ` | per-test results in your CI's test report (recommended) |
-   | `TEST_STEP_RESULTS_READ` | the failed step, its error and its screenshot for each failing test (recommended) |
+   | `TEST_STEP_RESULTS_READ` | failed-step screenshots, and failure details for runs from older ContextQA versions (optional) |
 
    Store it as a secret in your CI, named `CONTEXTQA_TOKEN`. Never commit it to the repository.
 
@@ -99,10 +99,11 @@ Add `CONTEXTQA_TOKEN` under **Settings › Secrets and variables › Actions**. 
 ```
 
 The report lists each test case under its current name in ContextQA, with its own duration; the run's and
-the suite's `time` is the run's wall-clock. A failing test carries the step that failed, its error and
-exception, and a link to the full ContextQA report. With `TEST_STEP_RESULTS_READ`, the failed step's
-screenshot is saved to `reports/contextqa-screenshots/` and referenced from the report as
-`[[ATTACHMENT|…]]` (shown by Jenkins and GitLab). Upload the folder that holds both, as above, to keep them.
+the suite's `time` is the run's wall-clock. A failing test carries the step that failed, its error, the
+expected result and the failure type, and a link to the full ContextQA report. The failed step's screenshot
+is saved to `reports/contextqa-screenshots/` and referenced from the report as `[[ATTACHMENT|…]]` (shown by
+Jenkins and GitLab); some screenshots need `TEST_STEP_RESULTS_READ`. Upload the folder that holds both, as
+above, to keep them.
 
 </details>
 
@@ -166,7 +167,7 @@ test case in their own test report.
 | `refused the token (HTTP 403)` | The token lacks a permission listed in [Before you start](#before-you-start), or the runner's IP is outside the token's allowlist. |
 | `not found (HTTP 404)` | The `api-url` is wrong, or the plan ID does not exist in the token's workspace. |
 | `Per-test results unavailable` | The token lacks `TEST_CASE_RESULTS_READ`. The verdict is unaffected; only per-test detail is missing. |
-| `Failure details skipped` | The token lacks `TEST_STEP_RESULTS_READ`. Failing tests keep their short message, without the failed step or screenshot. |
+| `Step results skipped` | The token lacks `TEST_STEP_RESULTS_READ`. Failure details still come from the run's results; only some screenshots, and details of runs from older ContextQA versions, are missing. |
 | `Screenshot for test case result … not saved` | The screenshot could not be fetched in time. The failed step is still reported; the screenshot is in the ContextQA report. |
 | `did not finish within 3600s` | The plan takes longer than the timeout. Raise `timeout`, and your CI's own job timeout above it. |
 
