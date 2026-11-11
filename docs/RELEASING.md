@@ -2,6 +2,11 @@
 
 One tag publishes every channel. `v*` tags are restricted to org admins.
 
+Before tagging, add the release to [CHANGELOG.md](../CHANGELOG.md) in the PR that lands it. Write it for
+customers: what changes in their pipeline and report, and any permission they may want to add, not a list of
+commits. After the workflow runs, replace the generated GitHub release notes with that section
+(`gh release edit v1.2.3 --notes-file notes.md`).
+
 ```sh
 git checkout main && git pull
 git tag v1.2.3 && git push origin v1.2.3

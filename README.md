@@ -169,8 +169,9 @@ test case in their own test report.
 | `refused the token (HTTP 403)` | The token lacks a permission listed in [Before you start](#before-you-start), or the runner's IP is outside the token's allowlist. |
 | `not found (HTTP 404)` | The `api-url` is wrong, or the plan ID does not exist in the token's workspace. |
 | `Per-test results unavailable` | The token lacks `TEST_CASE_RESULTS_READ`. The verdict is unaffected; only per-test detail is missing. |
-| `Step results skipped` | The token lacks `TEST_STEP_RESULTS_READ`. Failure details still come from the run's results; only some screenshots, and details of runs from older ContextQA versions, are missing. |
-| `Screenshot for test case result … not saved` | The screenshot could not be fetched in time. The failed step is still reported; the screenshot is in the ContextQA report. |
+| `Step results skipped` / `Failed-step screenshots skipped` | The token lacks `TEST_STEP_RESULTS_READ`. Failure details still come from the run's results; only some screenshots, and details of runs from older ContextQA versions, are missing. |
+| `Step results unavailable` | ContextQA did not answer the step-results request. The verdict and the rest of the report are unaffected; after three failed requests the report stops asking. |
+| `Screenshot for test case result … not saved` | The screenshot could not be fetched in time, or was larger than 10 MB. The failed step is still reported; the screenshot is in the ContextQA report. |
 | `did not finish within 3600s` | The plan takes longer than the timeout. Raise `timeout`, and your CI's own job timeout above it. |
 
 ## Security
@@ -183,8 +184,8 @@ test case in their own test report.
 ## Versioning
 
 `@v1`, `:1` and `@1` always point to the latest 1.x release. Changes that would break an existing pipeline
-(removed inputs, changed exit codes) only ship in a new major version. Release notes are on the
-[releases page](https://github.com/indivatools/contextqa-ci/releases).
+(removed inputs, changed exit codes) only ship in a new major version. What changed in each release is in
+[CHANGELOG.md](CHANGELOG.md) and on the [releases page](https://github.com/indivatools/contextqa-ci/releases).
 
 ## Support
 
