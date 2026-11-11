@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -540,6 +540,97 @@ describe('runTestPlan reports for CI (CON-6433)', () => {
     const summary = await runTestPlan(options(), recordingReporter(), { fetch: fake.fetch, ...fakeTime() });
 
     expect(summary.testCases?.[0]?.failedStep?.message).toBe('The screen shows another app');
+  });
+
+  it('keeps asking for step results after one failed read, and warns once', async () => {
+    const fake = server([testCaseRow(2, 'FAILURE'), testCaseRow(3, 'FAILURE')], { result: 'FAILURE' }).on(
+      'GET',
+      '/test_step_results',
+      () => text('down', 503),
+      () => text('down', 503),
+      () => text('down', 503),
+      () => json({ content: [{ id: 601, result: 'FAILURE', message: 'Timed out', stepDetails: { action: 'Click' } }] }),
+    );
+    const reporter = recordingReporter();
+
+    const summary = await runTestPlan(options(), reporter, { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.testCases?.find((t) => t.id === 2)?.failedStep).toBeUndefined();
+    expect(summary.testCases?.find((t) => t.id === 3)?.failedStep?.step).toBe('Click');
+    expect(reporter.lines.filter((l) => l.startsWith('WARN Step results unavailable'))).toHaveLength(1);
+  });
+
+  it('stops asking for step results after repeated failures', async () => {
+    const rows = [2, 3, 4, 5, 6].map((id) => testCaseRow(id, 'FAILURE'));
+    const fake = server(rows, { result: 'FAILURE' }).on('GET', '/test_step_results', () => text('down', 503));
+    const reporter = recordingReporter();
+
+    const summary = await runTestPlan(options(), reporter, { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.passed).toBe(false);
+    // Three test cases, three attempts each; the last two are never asked about.
+    expect(fake.calls('/test_step_results')).toHaveLength(9);
+    expect(reporter.lines.filter((l) => l.startsWith('WARN'))).toHaveLength(1);
+  });
+
+  it('only notes, without warning, that screenshots need the optional permission when the row has the failed step', async () => {
+    const fake = server([engineFailedRow(2)], { result: 'FAILURE' }).on('GET', '/test_step_results', () => text('Forbidden', 403));
+    const reporter = recordingReporter();
+
+    const summary = await runTestPlan(options({ screenshotDir: '/tmp/never' }), reporter, { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.testCases?.[0]?.failedStep?.step).toBe('Click on Pay');
+    expect(reporter.lines).toContain('Failed-step screenshots skipped: the token lacks the TEST_STEP_RESULTS_READ permission.');
+    expect(reporter.lines.some((l) => l.startsWith('WARN'))).toBe(false);
+  });
+
+  it('refuses a screenshot larger than 10 MB', async () => {
+    const dir = join(await mkdtemp(join(tmpdir(), 'cqa-shots-')), 'contextqa-screenshots');
+    const signed = 'https://storage.example.com/shots/big.png?sig=SECRET';
+    const fake = server([engineFailedRow(2, { executedResult: { failed_test_steps: [{ humanReadableText: 'Click', reason: 'x', stepScreenshotUrl: signed }] } })], {
+      result: 'FAILURE',
+    }).on('GET', '/shots/big.png', () => new Response(new Uint8Array([0x89]), { status: 200, headers: { 'Content-Length': String(11 * 1024 * 1024) } }));
+    const reporter = recordingReporter();
+
+    const summary = await runTestPlan(options({ screenshotDir: dir }), reporter, { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.testCases?.[0]?.screenshotPath).toBeUndefined();
+    expect(reporter.lines).toContain('WARN Screenshot for test case result 2 not saved: screenshot download: larger than 10 MB');
+  });
+
+  it('never quotes the signed URL when the download fails at the network level', async () => {
+    const dir = join(await mkdtemp(join(tmpdir(), 'cqa-shots-')), 'contextqa-screenshots');
+    const signed = 'https://storage.example.com/shots/net.png?sig=SECRET';
+    const fake = server([engineFailedRow(2, { executedResult: { failed_test_steps: [{ humanReadableText: 'Click', reason: 'x', stepScreenshotUrl: signed }] } })], {
+      result: 'FAILURE',
+    }).on('GET', '/shots/net.png', () => {
+      throw new TypeError(`Failed to fetch ${signed}`);
+    });
+    const reporter = recordingReporter();
+
+    const summary = await runTestPlan(options({ screenshotDir: dir }), reporter, { fetch: fake.fetch, ...fakeTime() });
+
+    expect(summary.testCases?.[0]?.screenshotPath).toBeUndefined();
+    expect(reporter.lines).toContain('WARN Screenshot for test case result 2 not saved: screenshot download: network error');
+    expect(reporter.lines.join('\n')).not.toContain('SECRET');
+  });
+
+  it('writes the attachment path relative to the working directory when the report is inside it', async () => {
+    const root = await mkdtemp(join(process.cwd(), '.cqa-shots-'));
+    try {
+      const dir = join(root, 'contextqa-screenshots');
+      const signed = 'https://storage.example.com/shots/rel.png?sig=SECRET';
+      const fake = server([engineFailedRow(2, { executedResult: { failed_test_steps: [{ humanReadableText: 'Click', reason: 'x', stepScreenshotUrl: signed }] } })], {
+        result: 'FAILURE',
+      }).on('GET', '/shots/rel.png', () => new Response(new Uint8Array([0xff, 0xd8, 1]), { status: 200 }));
+
+      const summary = await runTestPlan(options({ screenshotDir: dir }), recordingReporter(), { fetch: fake.fetch, ...fakeTime() });
+
+      const saved = summary.testCases?.[0]?.screenshotPath;
+      expect(saved).toBe(join(root.slice(process.cwd().length + 1), 'contextqa-screenshots', '2.jpg'));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('makes no step-result calls for a passing run', async () => {

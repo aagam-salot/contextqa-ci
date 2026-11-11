@@ -1,6 +1,6 @@
 import { openAsBlob } from 'node:fs';
 import { mkdir, stat, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, isAbsolute, join, relative } from 'node:path';
 import { isApiToken } from './auth.js';
 import { ContextQAClient, defaultSleep, screenshotUrlOf, type ClientDeps, type SleepFn } from './client.js';
 import { AuthError, ConfigError, InfraError, RunTimeoutError } from './errors.js';
@@ -22,6 +22,8 @@ const PLAN_ID_PATTERN = /^\d+$/;
 const NOT_PASSING = new Set(['FAILURE', 'ABORTED']);
 /** Failure details cost two calls per failed test; past this many, the report link has the rest. */
 const MAX_FAILURE_DETAILS = 50;
+/** Step results that keep failing (not refused) stop being asked for, so an outage can't stall the report. */
+const MAX_STEP_READ_FAILURES = 3;
 
 export interface RunDeps extends ClientDeps {
   now?: () => number;
@@ -202,18 +204,26 @@ async function addFailureDetails(
 ): Promise<void> {
   const failing = testCases.filter((t) => NOT_PASSING.has(t.result)).slice(0, MAX_FAILURE_DETAILS);
   let canReadSteps = true;
+  let readFailures = 0;
   for (const testCase of failing) {
     const needsStepRow = !testCase.failedStep || (screenshotDir !== undefined && !screenshotUrlOf(testCase));
     let stepRow: FailedStep | undefined;
     if (needsStepRow && canReadSteps) {
       try {
         stepRow = await client.failedStep(testCase.id);
+        readFailures = 0;
       } catch (error) {
-        canReadSteps = false;
         if (error instanceof AuthError) {
-          reporter.warn('Step results skipped: the token lacks the TEST_STEP_RESULTS_READ permission.');
+          // Refused once is refused for the run. The permission is optional: when the row already
+          // carries the failed step, only its screenshot is lost, which is not worth a warning.
+          canReadSteps = false;
+          const message = 'the token lacks the TEST_STEP_RESULTS_READ permission.';
+          if (testCase.failedStep) reporter.info(`Failed-step screenshots skipped: ${message}`);
+          else reporter.warn(`Step results skipped: ${message}`);
         } else {
-          reporter.warn(`Step results unavailable: ${errorText(error)}`);
+          readFailures += 1;
+          if (readFailures === 1) reporter.warn(`Step results unavailable: ${errorText(error)}`);
+          if (readFailures >= MAX_STEP_READ_FAILURES) canReadSteps = false;
         }
       }
     }
@@ -241,11 +251,21 @@ async function saveScreenshot(
     const path = join(dir, `${testCase.id}${imageExtension(image)}`);
     await mkdir(dir, { recursive: true });
     await writeFile(path, image);
-    return path;
+    return attachmentPath(path);
   } catch (error) {
     reporter.warn(`Screenshot for test case result ${testCase.id} not saved: ${errorText(error)}`);
     return undefined;
   }
+}
+
+/**
+ * The path JUnit attachments use. GitLab and Jenkins resolve `[[ATTACHMENT|…]]` against the project
+ * workspace, so a file inside the working directory is written relative to it.
+ */
+function attachmentPath(path: string): string {
+  if (!isAbsolute(path)) return path;
+  const fromCwd = relative(process.cwd(), path);
+  return fromCwd && !fromCwd.startsWith('..') && !isAbsolute(fromCwd) ? fromCwd : path;
 }
 
 function imageExtension(image: Uint8Array): string {

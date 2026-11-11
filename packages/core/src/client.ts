@@ -11,6 +11,9 @@ const MAX_TEST_CASE_PAGES = 100;
 /** Step results of one test case are read in a single page. */
 const STEP_RESULT_PAGE_SIZE = 1000;
 const FAILED_STEP_RESULTS = new Set(['FAILURE', 'ABORTED']);
+/** A failed-step screenshot is a page capture; anything bigger is not one and is not kept in memory. */
+const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024;
+const SCREENSHOT_TOO_LARGE = 'screenshot download: larger than 10 MB';
 
 const HTTP_UNAUTHORIZED = 401;
 const HTTP_FORBIDDEN = 403;
@@ -173,13 +176,23 @@ export class ContextQAClient {
 
   /** Downloads an image from a signed storage URL: without our token, and never naming the URL. */
   async downloadImage(signedUrl: string): Promise<Uint8Array> {
-    return this.withRetries('screenshot download', async () => {
-      const response = await this.fetchFn(signedUrl);
-      if (!response.ok) {
-        throw new HttpError(response.status, 'screenshot download', '');
-      }
-      return new Uint8Array(await response.arrayBuffer());
-    });
+    try {
+      return await this.withRetries('screenshot download', async () => {
+        const response = await this.fetchFn(signedUrl);
+        if (!response.ok) {
+          throw new HttpError(response.status, 'screenshot download', '');
+        }
+        const declared = Number(response.headers.get('content-length'));
+        if (declared > MAX_SCREENSHOT_BYTES) throw new InfraError(SCREENSHOT_TOO_LARGE);
+        const image = new Uint8Array(await response.arrayBuffer());
+        if (image.byteLength > MAX_SCREENSHOT_BYTES) throw new InfraError(SCREENSHOT_TOO_LARGE);
+        return image;
+      });
+    } catch (error) {
+      // A network error's message can quote the URL it failed on, so only our own messages pass through.
+      if (error instanceof HttpError || (error instanceof InfraError && error.message === SCREENSHOT_TOO_LARGE)) throw error;
+      throw new InfraError('screenshot download: network error');
+    }
   }
 
   private async getJson(path: string, params: QueryParams, retry: boolean): Promise<unknown> {

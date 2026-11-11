@@ -19720,6 +19720,8 @@ var TEST_CASE_PAGE_SIZE = 100;
 var MAX_TEST_CASE_PAGES = 100;
 var STEP_RESULT_PAGE_SIZE = 1e3;
 var FAILED_STEP_RESULTS = /* @__PURE__ */ new Set(["FAILURE", "ABORTED"]);
+var MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024;
+var SCREENSHOT_TOO_LARGE = "screenshot download: larger than 10 MB";
 var HTTP_UNAUTHORIZED = 401;
 var HTTP_FORBIDDEN = 403;
 var HTTP_NOT_FOUND = 404;
@@ -19844,13 +19846,22 @@ var ContextQAClient = class {
   }
   /** Downloads an image from a signed storage URL: without our token, and never naming the URL. */
   async downloadImage(signedUrl) {
-    return this.withRetries("screenshot download", async () => {
-      const response = await this.fetchFn(signedUrl);
-      if (!response.ok) {
-        throw new HttpError(response.status, "screenshot download", "");
-      }
-      return new Uint8Array(await response.arrayBuffer());
-    });
+    try {
+      return await this.withRetries("screenshot download", async () => {
+        const response = await this.fetchFn(signedUrl);
+        if (!response.ok) {
+          throw new HttpError(response.status, "screenshot download", "");
+        }
+        const declared = Number(response.headers.get("content-length"));
+        if (declared > MAX_SCREENSHOT_BYTES) throw new InfraError(SCREENSHOT_TOO_LARGE);
+        const image = new Uint8Array(await response.arrayBuffer());
+        if (image.byteLength > MAX_SCREENSHOT_BYTES) throw new InfraError(SCREENSHOT_TOO_LARGE);
+        return image;
+      });
+    } catch (error2) {
+      if (error2 instanceof HttpError || error2 instanceof InfraError && error2.message === SCREENSHOT_TOO_LARGE) throw error2;
+      throw new InfraError("screenshot download: network error");
+    }
   }
   async getJson(path, params, retry) {
     const url = new URL(this.apiUrl + path);
@@ -20148,7 +20159,7 @@ function xmlAttr(value) {
 // packages/core/src/run.ts
 import { openAsBlob } from "node:fs";
 import { mkdir as mkdir2, stat as stat2, writeFile as writeFile2 } from "node:fs/promises";
-import { basename, join as join2 } from "node:path";
+import { basename, isAbsolute, join as join2, relative } from "node:path";
 
 // packages/core/src/types.ts
 var RUN_STATUS_COMPLETED = "STATUS_COMPLETED";
@@ -20160,6 +20171,7 @@ var PASSING_RESULT = "SUCCESS";
 var PLAN_ID_PATTERN = /^\d+$/;
 var NOT_PASSING = /* @__PURE__ */ new Set(["FAILURE", "ABORTED"]);
 var MAX_FAILURE_DETAILS = 50;
+var MAX_STEP_READ_FAILURES = 3;
 async function runTestPlan(options, reporter, deps = {}) {
   validate(options);
   const sleep = deps.sleep ?? defaultSleep;
@@ -20282,18 +20294,24 @@ async function collectTestCases(client, reporter, runId, token) {
 async function addFailureDetails(client, reporter, testCases, screenshotDir) {
   const failing = testCases.filter((t) => NOT_PASSING.has(t.result)).slice(0, MAX_FAILURE_DETAILS);
   let canReadSteps = true;
+  let readFailures = 0;
   for (const testCase of failing) {
     const needsStepRow = !testCase.failedStep || screenshotDir !== void 0 && !screenshotUrlOf(testCase);
     let stepRow;
     if (needsStepRow && canReadSteps) {
       try {
         stepRow = await client.failedStep(testCase.id);
+        readFailures = 0;
       } catch (error2) {
-        canReadSteps = false;
         if (error2 instanceof AuthError) {
-          reporter.warn("Step results skipped: the token lacks the TEST_STEP_RESULTS_READ permission.");
+          canReadSteps = false;
+          const message = "the token lacks the TEST_STEP_RESULTS_READ permission.";
+          if (testCase.failedStep) reporter.info(`Failed-step screenshots skipped: ${message}`);
+          else reporter.warn(`Step results skipped: ${message}`);
         } else {
-          reporter.warn(`Step results unavailable: ${errorText(error2)}`);
+          readFailures += 1;
+          if (readFailures === 1) reporter.warn(`Step results unavailable: ${errorText(error2)}`);
+          if (readFailures >= MAX_STEP_READ_FAILURES) canReadSteps = false;
         }
       }
     }
@@ -20314,11 +20332,16 @@ async function saveScreenshot(client, reporter, dir, testCase, stepRow) {
     const path = join2(dir, `${testCase.id}${imageExtension(image)}`);
     await mkdir2(dir, { recursive: true });
     await writeFile2(path, image);
-    return path;
+    return attachmentPath(path);
   } catch (error2) {
     reporter.warn(`Screenshot for test case result ${testCase.id} not saved: ${errorText(error2)}`);
     return void 0;
   }
+}
+function attachmentPath(path) {
+  if (!isAbsolute(path)) return path;
+  const fromCwd = relative(process.cwd(), path);
+  return fromCwd && !fromCwd.startsWith("..") && !isAbsolute(fromCwd) ? fromCwd : path;
 }
 function imageExtension(image) {
   const isPng = image[0] === 137 && image[1] === 80 && image[2] === 78 && image[3] === 71;
